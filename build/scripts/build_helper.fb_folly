@@ -31,6 +31,7 @@ source $THIS_SCRIPT_PATH/build_helper
 #arg1 is force (0 or 1) (no interactive script)
 #arg2 is debug (0 or 1) (install debug libraries)
 install_fb_folly_from_source(){
+  echo_info "Starting to install folly from source"
   if [ $1 -eq 0 ]; then
     OPTION=""
     read -p "Do you want to install FaceBook folly (github)? <y/N> " prompt
@@ -66,7 +67,6 @@ install_fb_folly_from_source(){
       $SUDO $INSTALLER install $OPTION \
         g++ \
         cmake \
-        libboost-all-dev \
         libevent-dev \
         libdouble-conversion-dev \
         libgoogle-glog-dev \
@@ -128,7 +128,14 @@ install_fb_folly_from_source(){
       echo '     message(STATUS "Found gflags from package config ${gflags_CONFIG}")' >> patch.diff
       git apply patch.diff
     else
-        git checkout -f v2019.11.11.00
+      case "$(get_distribution_release)" in
+        "ubuntu20.04")
+          git checkout -f v2021.04.26.00
+        ;;
+        *)
+          git checkout -f v2019.11.11.00
+        ;;
+      esac
     fi
     mkdir _build && cd _build
     if [[ "$OS_BASEDISTRO" == "fedora" ]]; then
@@ -143,6 +150,7 @@ install_fb_folly_from_source(){
     ret=$?;[[ $ret -ne 0 ]] && popd && return $ret
     popd
   fi
+  echo_success "End of folly installation"
   return 0
 }
 

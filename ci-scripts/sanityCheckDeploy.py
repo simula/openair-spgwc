@@ -72,8 +72,6 @@ class deploySanityCheckTest():
         entrypoint = re.search('entrypoint', str(res))
         if entrypoint is not None:
             # TEMPORARY
-            #subprocess_run_w_echo('wget --quiet https://raw.githubusercontent.com/OPENAIRINTERFACE/openair-spgwc/dockerfile-improvements-2020-08/ci-scripts/generateConfigFiles.py -O ci-scripts/generateSpgwcConfigFiles.py')
-            #subprocess_run_w_echo('python3 ci-scripts/generateSpgwcConfigFiles.py --kind=SPGW-C --s11c=eth0 --sxc=eth1 --from_docker_file --env_for_entrypoint')
             subprocess_run_w_echo('python3 ci-scripts/generateConfigFiles.py --kind=SPGW-C --s11c=eth0 --sxc=eth1 --from_docker_file --env_for_entrypoint')
             # S11 to MME will be on `eth0`
             # SX to SPGWU will be on `eth1`
@@ -96,11 +94,30 @@ class deploySanityCheckTest():
             subprocess_run_w_echo('docker network connect --ip ' + CI_SPGWC_SXN_ADDR + ' ci-sx ci-oai-spgwc')
             subprocess_run_w_echo('python3 ci-scripts/generateConfigFiles.py --kind=SPGW-C --s11c=eth0 --sxc=eth1 --from_docker_file')
             subprocess_run_w_echo('docker cp ./spgwc-cfg.sh ci-oai-spgwc:/openair-spgwc')
-            subprocess_run_w_echo('docker exec -it ci-oai-spgwc /bin/bash -c "cd /openair-spgwc && chmod 777 spgwc-cfg.sh && ./spgwc-cfg.sh" >> archives/spgwc_config.log')
+            subprocess_run_w_echo('docker exec ci-oai-spgwc /bin/bash -c "cd /openair-spgwc && chmod 777 spgwc-cfg.sh && ./spgwc-cfg.sh" >> archives/spgwc_config.log')
 
     def deploySPGWU(self):
+        # First check if deployed SPGW-C supports multi-SPGWU and requires FDQN
         res = ''
-        # first check if tag exists
+        try:
+            res = subprocess.check_output('docker inspect --format="{{.Config.Labels}}" ci-oai-spgwc', shell=True, universal_newlines=True)
+        except:
+            sys.exit(-1)
+        branch = 'develop'
+        multi_supported = re.search('support-multi-sgwu-instances:true', str(res))
+        if multi_supported is not None:
+            res = ''
+            try:
+                res = subprocess.check_output('docker image inspect --format="{{.Config.Labels}}" oai-spgwu-tiny:' + self.tag, shell=True, universal_newlines=True)
+            except:
+                sys.exit(-1)
+            multi_supported = re.search('support-multi-sgwu-instances:true', str(res))
+            if multi_supported is None:
+                self.tag = 'multi-spgwu'
+                branch = 'multi-spgwu'
+
+        res = ''
+        # Then check if tag exists
         try:
             res = subprocess.check_output('docker image inspect oai-spgwu-tiny:' + self.tag, shell=True, universal_newlines=True)
         except:
@@ -109,8 +126,7 @@ class deploySanityCheckTest():
         # check if there is an entrypoint
         entrypoint = re.search('entrypoint', str(res))
         if entrypoint is not None:
-            #subprocess_run_w_echo('wget --quiet https://raw.githubusercontent.com/OPENAIRINTERFACE/openair-spgwu-tiny/dockerfile-improvements-2020-08/ci-scripts/generateConfigFiles.py -O ci-scripts/generateSpgwuConfigFiles.py')
-            subprocess_run_w_echo('wget --quiet https://raw.githubusercontent.com/OPENAIRINTERFACE/openair-spgwu-tiny/develop/ci-scripts/generateConfigFiles.py -O ci-scripts/generateSpgwuConfigFiles.py')
+            subprocess_run_w_echo('wget --quiet https://raw.githubusercontent.com/OPENAIRINTERFACE/openair-spgwu-tiny/' + branch + '/ci-scripts/generateConfigFiles.py -O ci-scripts/generateSpgwuConfigFiles.py')
             subprocess_run_w_echo('python3 ci-scripts/generateSpgwuConfigFiles.py --kind=SPGW-U --sxc_ip_addr=' + CI_SPGWC_SXN_ADDR + ' --sxu=eth1 --s1u=eth0 --from_docker_file --env_for_entrypoint')
             # S1U to eNB will be on `eth0`
             # SX to SPGWC will be on `eth1`
@@ -126,6 +142,7 @@ class deploySanityCheckTest():
             subprocess.run('rm -f tmp.awk', shell=True)
 
         else:
+            # This part should be obsolete now.
             # S1U to eNB will be on `eth0`
             subprocess_run_w_echo('docker run --privileged --name ci-oai-spgwu --network ci-s1u --ip ' + CI_SPGWU_S1U_ADDR + ' -d oai-spgwu-tiny:' + self.tag + ' /bin/bash -c "sleep infinity"')
             # SX to SPGWC will be on `eth1`
@@ -133,7 +150,7 @@ class deploySanityCheckTest():
             subprocess_run_w_echo('wget --quiet https://raw.githubusercontent.com/OPENAIRINTERFACE/openair-spgwu-tiny/develop/ci-scripts/generateConfigFiles.py -O ci-scripts/generateSpgwuConfigFiles.py')
             subprocess_run_w_echo('python3 ci-scripts/generateSpgwuConfigFiles.py --kind=SPGW-U --sxc_ip_addr=' + CI_SPGWC_SXN_ADDR + ' --sxu=eth1 --s1u=eth0 --from_docker_file')
             subprocess_run_w_echo('docker cp ./spgwu-cfg.sh ci-oai-spgwu:/openair-spgwu-tiny')
-            subprocess_run_w_echo('docker exec -it ci-oai-spgwu /bin/bash -c "cd /openair-spgwu-tiny && chmod 777 spgwu-cfg.sh && ./spgwu-cfg.sh" >> archives/spgwu_config.log')
+            subprocess_run_w_echo('docker exec ci-oai-spgwu /bin/bash -c "cd /openair-spgwu-tiny && chmod 777 spgwu-cfg.sh && ./spgwu-cfg.sh" >> archives/spgwu_config.log')
 
     def startSPGWC(self):
         res = ''
@@ -178,7 +195,7 @@ class deploySanityCheckTest():
         if entrypoint is not None:
             print('there is an entrypoint -- no need')
         else:
-            subprocess_run_w_echo('docker exec -it ci-oai-spgwc /bin/bash -c "killall oai_spgwc"')
+            subprocess_run_w_echo('docker exec ci-oai-spgwc /bin/bash -c "killall oai_spgwc"')
 
     def stopSPGWU(self):
         res = ''
@@ -193,7 +210,7 @@ class deploySanityCheckTest():
         if entrypoint is not None:
             print('there is an entrypoint')
         else:
-            subprocess_run_w_echo('docker exec -it ci-oai-spgwu /bin/bash -c "killall oai_spgwu"')
+            subprocess_run_w_echo('docker exec ci-oai-spgwu /bin/bash -c "killall oai_spgwu"')
 
     def logsSPGWC(self):
         res = ''

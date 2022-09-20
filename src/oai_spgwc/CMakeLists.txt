@@ -132,7 +132,8 @@ if (CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_boolean_option(LOG_OAI True "Thread safe logging API")
-  set(ASAN "asan")
+  # Set it manually if needed: SET(ASAN asan)
+  SET(ASAN)
 endif()
 if (CMAKE_BUILD_TYPE STREQUAL "")
    set(CMAKE_BUILD_TYPE "MinSizeRel")
@@ -163,25 +164,17 @@ set(CMAKE_C_FLAGS
 add_definitions(-DCMAKER)
 add_definitions(-DBSTRLIB_CAN_USE_STL=1 -DBSTRLIB_CAN_USE_IOSTREAM=1 -DBSTRLIB_THROWS_EXCEPTIONS=1)
 
-
-if(STATIC_LINKING)
-  set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0  -fno-omit-frame-pointer")
-else (STATIC_LINKING)
-  set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0 -fsanitize=address -fno-omit-frame-pointer")
-endif(STATIC_LINKING)
+# CMAKE_C_FLAGS_DEBUG: -fsanitize=address not compatible with valgrind
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0  -fno-omit-frame-pointer")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS} -O2 -fno-omit-frame-pointer -s -DINFO_IS_ON=1 ")
-set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS} -g  -O1 -DINFO_IS_ON=1 ")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS} -g -DMALLOC_CHECK_=3 -O1 -DINFO_IS_ON=1 ")
 set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS} -Os -s")
 
-if(STATIC_LINKING)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -std=c++17  -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0 -fno-omit-frame-pointer")
-else(STATIC_LINKING)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -std=c++17  -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0 -fsanitize=address -fno-omit-frame-pointer")
-endif(STATIC_LINKING)
+# CMAKE_CXX_FLAGS_DEBUG: -fsanitize=address not compatible with valgrind
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -std=c++17  -g -fstack-protector-all -DMALLOC_CHECK_=3 -DINFO_IS_ON=1 -DDEBUG_IS_ON=1 -DTRACE_IS_ON=1 -O0 -fno-omit-frame-pointer")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -std=c++17  -O2 -fno-omit-frame-pointer -s -DINFO_IS_ON=1")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS} -std=c++17 -g -O1 -DINFO_IS_ON=1")
 set(CMAKE_CXX_FLAGS_MINSIZEREL "${CMAKE_CXX_FLAGS} -std=c++17 -Os -s")
-
 
 ################################################################
 # Git Version
@@ -290,6 +283,8 @@ include_directories(${SRC_TOP_DIR}/common)
 include_directories(${SRC_TOP_DIR}/common/msg)
 include_directories(${SRC_TOP_DIR}/common/utils)
 include_directories(${SRC_TOP_DIR}/gtpv2c)
+include_directories(${SRC_TOP_DIR}/include_ext)
+include_directories(${SRC_TOP_DIR}/include_ext/rapidjson)
 include_directories(${SRC_TOP_DIR}/itti)
 include_directories(${SRC_TOP_DIR}/oai_spgwc)
 include_directories(${SRC_TOP_DIR}/pfcp)
@@ -297,6 +292,7 @@ include_directories(${SRC_TOP_DIR}/udp)
 include_directories(${SRC_TOP_DIR}/../build/ext/spdlog/include)
 
 add_library (SPGWC STATIC
+  ${SRC_TOP_DIR}/oai_spgwc/PfcpUpNodes.cpp
   ${SRC_TOP_DIR}/oai_spgwc/pgw_app.cpp
   ${SRC_TOP_DIR}/oai_spgwc/pgw_config.cpp
   ${SRC_TOP_DIR}/oai_spgwc/pgw_context.cpp
@@ -305,8 +301,8 @@ add_library (SPGWC STATIC
   ${SRC_TOP_DIR}/oai_spgwc/pgw_s5s8.cpp
   ${SRC_TOP_DIR}/oai_spgwc/pgwc_procedure.cpp
   ${SRC_TOP_DIR}/oai_spgwc/pgwc_sxab.cpp
+  ${SRC_TOP_DIR}/oai_spgwc/rest_handler.cpp
   ${SRC_TOP_DIR}/oai_spgwc/sgwc_app.cpp
-  ${SRC_TOP_DIR}/oai_spgwc/sgwc_config.cpp
   ${SRC_TOP_DIR}/oai_spgwc/sgwc_eps_bearer_context.cpp
   ${SRC_TOP_DIR}/oai_spgwc/sgwc_pdn_connection.cpp
   ${SRC_TOP_DIR}/oai_spgwc/sgwc_procedure.cpp
@@ -332,5 +328,5 @@ if(${SGW_AUTOTEST})
   SET(GTPV1U_LIB GTPV1U)
 endif(${SGW_AUTOTEST})
 
-target_link_libraries (spgwc ${ASAN} -Wl,--start-group CN_UTILS SPGWC UDP ${GTPV1U_LIB} GTPV2C PFCP 3GPP_COMMON_TYPES gflags glog dl double-conversion folly -Wl,--end-group pthread m rt config++ event boost_system )
+target_link_libraries (spgwc ${ASAN} -Wl,--start-group CN_UTILS SPGWC UDP ${GTPV1U_LIB} GTPV2C PFCP 3GPP_COMMON_TYPES gflags glog dl double-conversion folly -Wl,--end-group pthread m rt config++ event boost_system pistache)
 

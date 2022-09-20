@@ -4,8 +4,8 @@
  * this work for additional information regarding copyright ownership.
  * The OpenAirInterface Software Alliance licenses this file to You under
  * the OAI Public License, Version 1.1  (the "License"); you may not use this
- *file except in compliance with the License. You may obtain a copy of the
- *License at
+ * file except in compliance with the License. You may obtain a copy of the
+ * License at
  *
  *      http://www.openairinterface.org/?page_id=698
  *
@@ -31,6 +31,7 @@
 #include "itti.hpp"
 #include "logger.hpp"
 #include "pgw_config.hpp"
+#include "PfcpUpNodes.hpp"
 
 #include <chrono>
 #include <ctime>
@@ -54,7 +55,7 @@ void pgwc_sxab_task(void* args_p) {
 
   do {
     std::shared_ptr<itti_msg> shared_msg = itti_inst->receive_msg(task_id);
-    auto* msg = shared_msg.get();
+    auto* msg                            = shared_msg.get();
     switch (msg->msg_type) {
       case SXAB_HEARTBEAT_REQUEST:
         if (itti_sxab_heartbeat_request* m =
@@ -73,7 +74,8 @@ void pgwc_sxab_task(void* args_p) {
       case SXAB_ASSOCIATION_SETUP_REQUEST:
         if (itti_sxab_association_setup_request* m =
                 dynamic_cast<itti_sxab_association_setup_request*>(msg)) {
-          pgwc_sxab_inst->handle_itti_msg(ref(*m));
+          // pgwc_sxab_inst->handle_itti_msg(ref(*m));
+          pgwc_sxab_inst->send_sx_msg(ref(*m));
         }
         break;
 
@@ -163,17 +165,16 @@ void pgwc_sxab_task(void* args_p) {
 
       case TIME_OUT:
         if (itti_msg_timeout* to = dynamic_cast<itti_msg_timeout*>(msg)) {
-          Logger::pgwc_sx().info("TIME-OUT event timer id %d", to->timer_id);
+          Logger::pgwc_sx().trace(
+              "TIME-OUT event timer id %d arg1 %d", to->timer_id,
+              to->arg1_user);
           switch (to->arg1_user) {
             case TASK_PGWC_SX_TRIGGER_HEARTBEAT_REQUEST:
               pfcp_associations::get_instance().initiate_heartbeat_request(
                   to->timer_id, to->arg2_user);
               break;
-            case TASK_PGWC_SX_TIMEOUT_HEARTBEAT_REQUEST:
-              pfcp_associations::get_instance().timeout_heartbeat_request(
-                  to->timer_id, to->arg2_user);
-              break;
-            default:;
+            default:
+              pgwc_sxab_inst->time_out_itti_event(to->timer_id);
           }
         }
         break;
@@ -197,23 +198,25 @@ void pgwc_sxab_task(void* args_p) {
 
 //------------------------------------------------------------------------------
 pgwc_sxab::pgwc_sxab()
-    : pfcp_l4_stack(string(inet_ntoa(pgw_cfg.sx.addr4)), pgw_cfg.sx.port,
-                    pgw_cfg.sx.thread_rd_sched_params) {
+    : pfcp_l4_stack(
+          pgw_cfg.pfcp_.t1_ms, pgw_cfg.pfcp_.n1,
+          string(inet_ntoa(pgw_cfg.sx_.iface.addr4)), pgw_cfg.pfcp_.port,
+          pgw_cfg.pfcp_.sched_params) {
   Logger::pgwc_sx().startup("Starting...");
   // TODO  refine this, look at RFC5905
-  std::tm tm_epoch = {0};          // Feb 8th, 2036
-  tm_epoch.tm_year = 2036 - 1900;  // years count from 1900
-  tm_epoch.tm_mon = 2 - 1;         // months count from January=0
-  tm_epoch.tm_mday = 8;            // days count from 1
+  std::tm tm_epoch       = {0};          // Feb 8th, 2036
+  tm_epoch.tm_year       = 2036 - 1900;  // years count from 1900
+  tm_epoch.tm_mon        = 2 - 1;        // months count from January=0
+  tm_epoch.tm_mday       = 8;            // days count from 1
   std::time_t time_epoch = std::mktime(&tm_epoch);
   std::chrono::time_point<std::chrono::system_clock> now =
       std::chrono::system_clock::now();
-  std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+  std::time_t now_c    = std::chrono::system_clock::to_time_t(now);
   std::time_t ellapsed = now_c - time_epoch;
-  recovery_time_stamp = ellapsed;
+  recovery_time_stamp  = ellapsed;
 
   // TODO may load this from config
-  cp_function_features = {};
+  cp_function_features      = {};
   cp_function_features.ovrl = 0;
   cp_function_features.load = 0;
 
@@ -225,10 +228,11 @@ pgwc_sxab::pgwc_sxab()
 }
 
 //------------------------------------------------------------------------------
-void pgwc_sxab::handle_receive_pfcp_msg(pfcp_msg& msg,
-                                        const endpoint& remote_endpoint) {
-  Logger::pgwc_sx().trace("handle_receive_pfcp_msg msg type %d length %d",
-                          msg.get_message_type(), msg.get_message_length());
+void pgwc_sxab::handle_receive_pfcp_msg(
+    pfcp_msg& msg, const endpoint& remote_endpoint) {
+  Logger::pgwc_sx().trace(
+      "handle_receive_pfcp_msg msg type %d length %d", msg.get_message_type(),
+      msg.get_message_length());
   switch (msg.get_message_type()) {
     case PFCP_ASSOCIATION_SETUP_REQUEST:
       handle_receive_association_setup_request(msg, remote_endpoint);
@@ -254,6 +258,8 @@ void pgwc_sxab::handle_receive_pfcp_msg(pfcp_msg& msg,
     case PFCP_PFCP_PFD_MANAGEMENT_REQUEST:
     case PFCP_PFCP_PFD_MANAGEMENT_RESPONSE:
     case PFCP_ASSOCIATION_SETUP_RESPONSE:
+      handle_receive_association_setup_response(msg, remote_endpoint);
+      break;
     case PFCP_ASSOCIATION_UPDATE_REQUEST:
     case PFCP_ASSOCIATION_UPDATE_RESPONSE:
     case PFCP_ASSOCIATION_RELEASE_REQUEST:
@@ -280,8 +286,8 @@ void pgwc_sxab::handle_receive_pfcp_msg(pfcp_msg& msg,
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_heartbeat_request(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                               = true;
+  uint64_t trxn_id                         = 0;
   pfcp_heartbeat_request msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
@@ -294,14 +300,16 @@ void pgwc_sxab::handle_receive_heartbeat_request(
           "ignore message");
       return;
     }
+    pfcp_associations::get_instance().handle_receive_heartbeat_request(
+        trxn_id, remote_endpoint, msg_ies_container.recovery_time_stamp.second);
     send_heartbeat_response(remote_endpoint, trxn_id);
   }
 }
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_heartbeat_response(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                = true;
+  uint64_t trxn_id                          = 0;
   pfcp_heartbeat_response msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
@@ -315,14 +323,14 @@ void pgwc_sxab::handle_receive_heartbeat_response(
       return;
     }
     pfcp_associations::get_instance().handle_receive_heartbeat_response(
-        trxn_id);
+        trxn_id, remote_endpoint, msg_ies_container.recovery_time_stamp.second);
   }
 }
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_association_setup_request(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                       = true;
+  uint64_t trxn_id                                 = 0;
   pfcp_association_setup_request msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
@@ -342,74 +350,66 @@ void pgwc_sxab::handle_receive_association_setup_request(
           "IE!, ignore message");
       return;
     }
-    bool restore_sx_sessions = false;
-    if (msg_ies_container.up_function_features.first) {
-      // Should be detected by lower layers
-      pfcp_associations::get_instance().add_association(
-          msg_ies_container.node_id.second,
-          msg_ies_container.recovery_time_stamp.second,
-          msg_ies_container.up_function_features.second, restore_sx_sessions);
-    } else {
-      pfcp_associations::get_instance().add_association(
-          msg_ies_container.node_id.second,
-          msg_ies_container.recovery_time_stamp.second, restore_sx_sessions);
-    }
-
-    // always yes (for the time being)
-    itti_sxab_association_setup_response a(TASK_SPGWU_SX, TASK_SPGWU_SX);
-    a.trxn_id = trxn_id;
-    pfcp::cause_t cause = {.cause_value = pfcp::CAUSE_VALUE_REQUEST_ACCEPTED};
-    a.pfcp_ies.set(cause);
-    pfcp::node_id_t node_id = {};
-    if (pgw_cfg.get_pfcp_node_id(node_id) == RETURNok) {
-      a.pfcp_ies.set(node_id);
-      pfcp::recovery_time_stamp_t r = {.recovery_time_stamp =
-                                           (uint32_t)recovery_time_stamp};
-      a.pfcp_ies.set(r);
-      a.pfcp_ies.set(cp_function_features);
-      if (node_id.node_id_type == pfcp::NODE_ID_TYPE_IPV4_ADDRESS) {
-        // a.l_endpoint =
-        // boost::asio::ip::udp::endpoint(boost::asio::ip::address_v4(pgw_cfg.sx.addr4),
-        // 0);
-        a.r_endpoint = remote_endpoint;
-        send_sx_msg(a);
-      } else {
-        Logger::pgwc_sx().warn(
-            "Received SX ASSOCIATION SETUP REQUEST TODO node_id IPV6, FQDN!, "
-            "ignore message");
-        return;
-      }
-    } else {
-      Logger::pgwc_sx().warn(
-          "Received SX ASSOCIATION SETUP REQUEST could not set node id!, "
-          "ignore message");
-      return;
-    }
-
-    if (restore_sx_sessions) {
-      pfcp_associations::get_instance().restore_sx_sessions(
-          msg_ies_container.node_id.second);
-    }
+    PfcpUpNodes::Instance().AssociationSetupRequest(
+        trxn_id, remote_endpoint, msg_ies_container.node_id.second,
+        msg_ies_container.recovery_time_stamp.second,
+        msg_ies_container.up_function_features,
+        msg_ies_container.user_plane_ip_resource_information);
   }
 }
+//------------------------------------------------------------------------------
+void pgwc_sxab::handle_receive_association_setup_response(
+    pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
+  // TODO: To be completed
+  Logger::pgwc_sx().info(
+      "Received SX ASSOCIATION SETUP RESPONSE from an UP NODE");
+  bool error                                        = true;
+  uint64_t trxn_id                                  = 0;
+  pfcp_association_setup_response msg_ies_container = {};
+  msg.to_core_type(msg_ies_container);
 
+  handle_receive_message_cb(
+      msg, remote_endpoint, TASK_SPGWU_SX, error, trxn_id);
+  if (!error) {
+    if (not msg_ies_container.node_id.first) {
+      // Should be detected by lower layers
+      Logger::pgwc_sx().warn(
+          "Received Sx ASSOCIATION SETUP RESPONSE without node id IE!, ignore "
+          "message");
+      return;
+    }
+    if (not msg_ies_container.recovery_time_stamp.first) {
+      // Should be detected by lower layers
+      Logger::pgwc_sx().warn(
+          "Received Sx ASSOCIATION SETUP RESPONSE without recovery time stamp "
+          "IE!, ignore message");
+      return;
+    }
+    Logger::pgwc_sx().info("Received Sx ASSOCIATION SETUP RESPONSE");
+
+    PfcpUpNodes::Instance().AssociationSetupResp(
+        remote_endpoint, msg_ies_container.node_id.second,
+        msg_ies_container.recovery_time_stamp.second,
+        msg_ies_container.up_function_features);
+  }
+}
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_session_establishment_response(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                            = true;
+  uint64_t trxn_id                                      = 0;
   pfcp_session_establishment_response msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
   handle_receive_message_cb(msg, remote_endpoint, TASK_PGWC_SX, error, trxn_id);
   if (!error) {
     itti_sxab_session_establishment_response* itti_msg =
-        new itti_sxab_session_establishment_response(TASK_PGWC_SX,
-                                                     TASK_PGWC_APP);
-    itti_msg->pfcp_ies = msg_ies_container;
+        new itti_sxab_session_establishment_response(
+            TASK_PGWC_SX, TASK_PGWC_APP);
+    itti_msg->pfcp_ies   = msg_ies_container;
     itti_msg->r_endpoint = remote_endpoint;
-    itti_msg->trxn_id = trxn_id;
-    itti_msg->seid = msg.get_seid();
+    itti_msg->trxn_id    = trxn_id;
+    itti_msg->seid       = msg.get_seid();
     std::shared_ptr<itti_sxab_session_establishment_response> i =
         std::shared_ptr<itti_sxab_session_establishment_response>(itti_msg);
     int ret = itti_inst->send_msg(i);
@@ -424,20 +424,20 @@ void pgwc_sxab::handle_receive_session_establishment_response(
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_session_modification_response(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                           = true;
+  uint64_t trxn_id                                     = 0;
   pfcp_session_modification_response msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
   handle_receive_message_cb(msg, remote_endpoint, TASK_PGWC_SX, error, trxn_id);
   if (!error) {
     itti_sxab_session_modification_response* itti_msg =
-        new itti_sxab_session_modification_response(TASK_PGWC_SX,
-                                                    TASK_PGWC_APP);
-    itti_msg->pfcp_ies = msg_ies_container;
+        new itti_sxab_session_modification_response(
+            TASK_PGWC_SX, TASK_PGWC_APP);
+    itti_msg->pfcp_ies   = msg_ies_container;
     itti_msg->r_endpoint = remote_endpoint;
-    itti_msg->trxn_id = trxn_id;
-    itti_msg->seid = msg.get_seid();
+    itti_msg->trxn_id    = trxn_id;
+    itti_msg->seid       = msg.get_seid();
     std::shared_ptr<itti_sxab_session_modification_response> i =
         std::shared_ptr<itti_sxab_session_modification_response>(itti_msg);
     int ret = itti_inst->send_msg(i);
@@ -452,8 +452,8 @@ void pgwc_sxab::handle_receive_session_modification_response(
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_session_deletion_response(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                       = true;
+  uint64_t trxn_id                                 = 0;
   pfcp_session_deletion_response msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
@@ -461,10 +461,10 @@ void pgwc_sxab::handle_receive_session_deletion_response(
   if (!error) {
     itti_sxab_session_deletion_response* itti_msg =
         new itti_sxab_session_deletion_response(TASK_PGWC_SX, TASK_PGWC_APP);
-    itti_msg->pfcp_ies = msg_ies_container;
+    itti_msg->pfcp_ies   = msg_ies_container;
     itti_msg->r_endpoint = remote_endpoint;
-    itti_msg->trxn_id = trxn_id;
-    itti_msg->seid = msg.get_seid();
+    itti_msg->trxn_id    = trxn_id;
+    itti_msg->seid       = msg.get_seid();
     std::shared_ptr<itti_sxab_session_deletion_response> i =
         std::shared_ptr<itti_sxab_session_deletion_response>(itti_msg);
     int ret = itti_inst->send_msg(i);
@@ -479,8 +479,8 @@ void pgwc_sxab::handle_receive_session_deletion_response(
 //------------------------------------------------------------------------------
 void pgwc_sxab::handle_receive_session_report_request(
     pfcp::pfcp_msg& msg, const endpoint& remote_endpoint) {
-  bool error = true;
-  uint64_t trxn_id = 0;
+  bool error                                    = true;
+  uint64_t trxn_id                              = 0;
   pfcp_session_report_request msg_ies_container = {};
   msg.to_core_type(msg_ies_container);
 
@@ -488,10 +488,10 @@ void pgwc_sxab::handle_receive_session_report_request(
   if (!error) {
     itti_sxab_session_report_request* itti_msg =
         new itti_sxab_session_report_request(TASK_PGWC_SX, TASK_PGWC_APP);
-    itti_msg->pfcp_ies = msg_ies_container;
+    itti_msg->pfcp_ies   = msg_ies_container;
     itti_msg->r_endpoint = remote_endpoint;
-    itti_msg->trxn_id = trxn_id;
-    itti_msg->seid = msg.get_seid();
+    itti_msg->trxn_id    = trxn_id;
+    itti_msg->seid       = msg.get_seid();
     std::shared_ptr<itti_sxab_session_report_request> i =
         std::shared_ptr<itti_sxab_session_report_request>(itti_msg);
     int ret = itti_inst->send_msg(i);
@@ -505,42 +505,45 @@ void pgwc_sxab::handle_receive_session_report_request(
 }
 
 //------------------------------------------------------------------------------
+void pgwc_sxab::send_sx_msg(itti_sxab_association_setup_request& i) {
+  pfcp::recovery_time_stamp_t r = {.recovery_time_stamp =
+                                       (uint32_t) recovery_time_stamp};
+  i.pfcp_ies.set(r);
+  send_request(i.r_endpoint, i.pfcp_ies, TASK_PGWC_SX, i.trxn_id);
+}
+//------------------------------------------------------------------------------
 void pgwc_sxab::send_sx_msg(itti_sxab_association_setup_response& i) {
-  send_response(i.r_endpoint, i.pfcp_ies, i.trxn_id);
+  pfcp::recovery_time_stamp_t r = {.recovery_time_stamp =
+                                       (uint32_t) recovery_time_stamp};
+  i.pfcp_ies.set(r);
+  if (cp_function_features.has_features()) {
+    i.pfcp_ies.set(cp_function_features);
+  }
+  send_response(i.r_endpoint, i.pfcp_ies, i.trxn_id, CONTINUE_TX);
 }
 //------------------------------------------------------------------------------
 void pgwc_sxab::send_sx_msg(itti_sxab_session_report_response& i) {
-  send_response(i.r_endpoint, i.seid, i.pfcp_ies, i.trxn_id);
+  send_response(i.r_endpoint, i.seid, i.pfcp_ies, i.trxn_id, CONTINUE_TX);
 }
 //------------------------------------------------------------------------------
 void pgwc_sxab::send_heartbeat_request(std::shared_ptr<pfcp_association>& a) {
   pfcp::pfcp_heartbeat_request h = {};
-  pfcp::recovery_time_stamp_t r = {.recovery_time_stamp =
-                                       (uint32_t)recovery_time_stamp};
+  pfcp::recovery_time_stamp_t r  = {.recovery_time_stamp =
+                                       (uint32_t) recovery_time_stamp};
   h.set(r);
-
-  pfcp::node_id_t& node_id = a->node_id;
-  if (node_id.node_id_type == pfcp::NODE_ID_TYPE_IPV4_ADDRESS) {
-    a->timer_heartbeat = itti_inst->timer_setup(
-        5, 0, TASK_PGWC_SX, TASK_PGWC_SX_TIMEOUT_HEARTBEAT_REQUEST,
-        a->hash_node_id);
-
-    endpoint r_endpoint = endpoint(node_id.u1.ipv4_address, pfcp::default_port);
-    a->trxn_id_heartbeat = generate_trxn_id();
-    send_request(r_endpoint, h, TASK_PGWC_SX, a->trxn_id_heartbeat);
-
-  } else {
-    Logger::pgwc_sx().warn("TODO send_heartbeat_request() node_id IPV6, FQDN!");
-  }
+  endpoint r_endpoint = a->remote_endpoint;
+  r_endpoint.set_port(pfcp::default_port);
+  a->trxn_id_heartbeat = generate_trxn_id();
+  send_request(r_endpoint, h, TASK_PGWC_SX, a->trxn_id_heartbeat);
 }
 //------------------------------------------------------------------------------
-void pgwc_sxab::send_heartbeat_response(const endpoint& r_endpoint,
-                                        const uint64_t trxn_id) {
+void pgwc_sxab::send_heartbeat_response(
+    const endpoint& r_endpoint, const uint64_t trxn_id) {
   pfcp::pfcp_heartbeat_response h = {};
-  pfcp::recovery_time_stamp_t r = {.recovery_time_stamp =
-                                       (uint32_t)recovery_time_stamp};
+  pfcp::recovery_time_stamp_t r   = {.recovery_time_stamp =
+                                       (uint32_t) recovery_time_stamp};
   h.set(r);
-  send_response(r_endpoint, h, trxn_id);
+  send_response(r_endpoint, h, trxn_id, CONTINUE_TX);
 }
 //------------------------------------------------------------------------------
 void pgwc_sxab::send_sx_msg(itti_sxab_session_establishment_request& i) {
@@ -555,14 +558,14 @@ void pgwc_sxab::send_sx_msg(itti_sxab_session_deletion_request& i) {
   send_request(i.r_endpoint, i.seid, i.pfcp_ies, TASK_PGWC_SX, i.trxn_id);
 }
 //------------------------------------------------------------------------------
-void pgwc_sxab::handle_receive(char* recv_buffer,
-                               const std::size_t bytes_transferred,
-                               const endpoint& remote_endpoint) {
+void pgwc_sxab::handle_receive(
+    char* recv_buffer, const std::size_t bytes_transferred,
+    const endpoint& remote_endpoint) {
   Logger::pgwc_sx().info("handle_receive(%d bytes)", bytes_transferred);
   // std::cout << string_to_hex(recv_buffer, bytes_transferred) << std::endl;
   std::istringstream iss(std::istringstream::binary);
   iss.rdbuf()->pubsetbuf(recv_buffer, bytes_transferred);
-  pfcp_msg msg = {};
+  pfcp_msg msg    = {};
   msg.remote_port = remote_endpoint.port();
   try {
     msg.load_from(iss);
@@ -577,5 +580,26 @@ void pgwc_sxab::time_out_itti_event(const uint32_t timer_id) {
   time_out_event(timer_id, TASK_PGWC_SX, handled);
   if (!handled) {
     Logger::pgwc_sx().error("Timer %d not Found", timer_id);
+  }
+}
+//------------------------------------------------------------------------------
+void pgwc_sxab::notify_ul_error(
+    const endpoint& remote_endpoint, const uint8_t message_type,
+    const uint32_t message_sequence_number, const uint64_t trxn_id,
+    const ::cause_value_e cause) {
+  Logger::pgwc_sx().trace(
+      "notify_ul_error proc %" PRId64 " cause %d", trxn_id, cause);
+  // TODO if needed: collection registering subscribers for events.
+  // Specific error case, others can be handled
+  if (cause == REMOTE_PEER_NOT_RESPONDING) {
+    switch (message_type) {
+      case PFCP_HEARTBEAT_REQUEST:
+        pfcp_associations::get_instance().timeout_heartbeat_request(
+            trxn_id, remote_endpoint);
+        break;
+      default:
+          // TODO later, for stats, etc
+          ;
+    }
   }
 }
